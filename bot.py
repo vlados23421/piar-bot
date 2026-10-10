@@ -2,7 +2,7 @@ import logging
 import telebot
 from flask import Flask, request
 
-# === НАСТРОЙКИ (ВПИСАНЫ В КОД) ===
+# === НАСТРОЙКИ ===
 BOT_TOKEN = "8337839229:AAH7EuRNbQK2xn74o1WiDa-TxZHdDA795tg"
 WEBHOOK_URL = "https://piar-bot-5zlx.onrender.com"
 ADMIN_ID = 8718572838
@@ -90,24 +90,29 @@ def faq_command(message):
 # === КНОПКИ ===
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    if call.data == "rules":
-        send_rules(call.message.chat.id, edit=True, message_id=call.message.message_id)
-    elif call.data == "price":
-        send_price(call.message.chat.id, edit=True, message_id=call.message.message_id)
-    elif call.data == "order":
-        send_order(call.message.chat.id, edit=True, message_id=call.message.message_id)
-    elif call.data == "faq":
-        send_faq(call.message.chat.id, edit=True, message_id=call.message.message_id)
-    elif call.data == "back":
-        text = "👋 <b>ПИАР ЧАТ | SAMP | CRMP | MTA</b>\n\n👇 <b>Выбери действие:</b>"
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode='HTML',
-            reply_markup=main_menu()
-        )
-    bot.answer_callback_query(call.id)
+    try:
+        logger.info(f"Callback: {call.data} от {call.from_user.id}")
+        if call.data == "rules":
+            send_rules(call.message.chat.id, edit=True, message_id=call.message.message_id)
+        elif call.data == "price":
+            send_price(call.message.chat.id, edit=True, message_id=call.message.message_id)
+        elif call.data == "order":
+            send_order(call.message.chat.id, edit=True, message_id=call.message.message_id)
+        elif call.data == "faq":
+            send_faq(call.message.chat.id, edit=True, message_id=call.message.message_id)
+        elif call.data == "back":
+            text = "👋 <b>ПИАР ЧАТ | SAMP | CRMP | MTA</b>\n\n👇 <b>Выбери действие:</b>"
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=main_menu()
+            )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Ошибка callback: {e}")
+        bot.answer_callback_query(call.id, "Ошибка. Попробуйте позже.")
 
 
 # === ФУНКЦИИ ОТПРАВКИ ===
@@ -233,7 +238,11 @@ def get_message():
 def webhook():
     try:
         bot.remove_webhook()
-        result = bot.set_webhook(url=WEBHOOK_URL + "/" + BOT_TOKEN)
+        # ВАЖНО: allowed_updates — разрешаем все типы обновлений, включая callback_query
+        result = bot.set_webhook(
+            url=WEBHOOK_URL + "/" + BOT_TOKEN,
+            allowed_updates=["message", "callback_query", "edited_message", "channel_post"]
+        )
         if result:
             return f"Webhook установлен на {WEBHOOK_URL}/{BOT_TOKEN}", 200
         return "Ошибка установки вебхука", 500
