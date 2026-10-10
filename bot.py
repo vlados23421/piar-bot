@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import telebot
 from flask import Flask, request
 
@@ -15,9 +16,59 @@ logger = logging.getLogger(__name__)
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 
+# === БАЗА ДАННЫХ ===
+DB_PATH = "/tmp/users.db"  # /tmp — потому что на Render постоянная папка не сохраняется
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def add_user(user):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+            (user.id, user.username or "", user.first_name or "")
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка добавления пользователя: {e}")
+
+
+def get_all_users():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    users = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return users
+
+
+def get_users_count():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
 
 # === КЛАВИАТУРЫ ===
-def main_menu():
+def main_menu(user_id):
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         telebot.types.InlineKeyboardButton("📜 Правила чата", callback_data="rules"),
@@ -27,6 +78,9 @@ def main_menu():
         telebot.types.InlineKeyboardButton("📢 Наш чат", url="https://t.me/BeanRussiaOnline"),
         telebot.types.InlineKeyboardButton("🛡 Связь с админом", url="https://t.me/MaleficentR7"),
     )
+    # Добавляем кнопку админ-панели ТОЛЬКО для админа
+    if user_id == ADMIN_ID:
+        markup.add(telebot.types.InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel"))
     return markup
 
 
@@ -36,9 +90,22 @@ def back_menu():
     return markup
 
 
+def admin_menu():
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        telebot.types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+        telebot.types.InlineKeyboardButton("👥 Пользователи", callback_data="admin_users"),
+        telebot.types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
+        telebot.types.InlineKeyboardButton("🛠 Команды", callback_data="admin_commands"),
+        telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="back"),
+    )
+    return markup
+
+
 # === КОМАНДЫ ===
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    add_user(message.from_user)
     text = (
         "👋 <b>Добро пожаловать в ПИАР ЧАТ | SAMP | CRMP | MTA!</b>\n\n"
         "📌 Здесь ты можешь:\n"
@@ -48,8 +115,7 @@ def start_command(message):
         "• Задать вопрос администрации\n\n"
         "👇 <b>Выбери действие:</b>"
     )
-    bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=main_menu())
-    logger.info(f"Пользователь {message.from_user.id} запустил бота.")
+    bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=main_menu(message.from_user.id))
 
 
 @bot.message_handler(commands=['help'])
@@ -87,11 +153,71 @@ def faq_command(message):
     send_faq(message.chat.id)
 
 
+# === АДМИН-КОМАНДЫ ===
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ У вас нет доступа.")
+        return
+    count = get_users_count()
+    bot.reply_to(
+        message,
+        f"📊 <b>СТАТИСТИКА</b>\n\n"
+        f"👥 Всего пользователей: <b>{count}</b>\n"
+        f"🟢 Бот работает стабильно.",
+        parse_mode='HTML'
+    )
+
+
+@bot.message_handler(commands=['users'])
+def users_command(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    users = get_all_users()
+    text = f"👥 <b>ПОЛЬЗОВАТЕЛИ ({len(users)})</b>\n\n"
+    for uid in users[:50]:  # максимум 50
+        text += f"• <code>{uid}</code>\n"
+    if len(users) > 50:
+        text += f"\n...и ещё {len(users) - 50}"
+    bot.send_message(message.chat.id, text, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.replace('/broadcast ', '', 1)
+    if not text or text == '/broadcast':
+        bot.reply_to(message, "📝 Используйте: /broadcast [текст]")
+        return
+    users = get_all_users()
+    success = 0
+    failed = 0
+    for uid in users:
+        try:
+            bot.send_message(uid, text, parse_mode='HTML')
+            success += 1
+        except Exception:
+            failed += 1
+    bot.reply_to(message, f"📢 Рассылка завершена.\n✅ Успешно: {success}\n❌ Ошибок: {failed}")
+
+
+@bot.message_handler(commands=['say'])
+def say_command(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.replace('/say ', '', 1)
+    if text:
+        bot.send_message(message.chat.id, text, parse_mode='HTML')
+
+
 # === КНОПКИ ===
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
         logger.info(f"Callback: {call.data} от {call.from_user.id}")
+
+        # Обычные кнопки
         if call.data == "rules":
             send_rules(call.message.chat.id, edit=True, message_id=call.message.message_id)
         elif call.data == "price":
@@ -107,8 +233,73 @@ def callback_handler(call):
                 message_id=call.message.message_id,
                 text=text,
                 parse_mode='HTML',
-                reply_markup=main_menu()
+                reply_markup=main_menu(call.from_user.id)
             )
+
+        # Админ-кнопки (только для админа)
+        elif call.data == "admin_panel":
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(call.id, "❌ Доступ запрещён.")
+                return
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="⚙️ <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери действие:",
+                parse_mode='HTML',
+                reply_markup=admin_menu()
+            )
+        elif call.data == "admin_stats":
+            if call.from_user.id != ADMIN_ID:
+                return
+            count = get_users_count()
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=f"📊 <b>СТАТИСТИКА</b>\n\n👥 Пользователей: <b>{count}</b>",
+                parse_mode='HTML',
+                reply_markup=admin_menu()
+            )
+        elif call.data == "admin_users":
+            if call.from_user.id != ADMIN_ID:
+                return
+            users = get_all_users()
+            text = f"👥 <b>ПОЛЬЗОВАТЕЛИ ({len(users)})</b>\n\n"
+            for uid in users[:20]:
+                text += f"• <code>{uid}</code>\n"
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=admin_menu()
+            )
+        elif call.data == "admin_broadcast":
+            if call.from_user.id != ADMIN_ID:
+                return
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="📢 <b>РАССЫЛКА</b>\n\nИспользуйте команду:\n<code>/broadcast [текст]</code>",
+                parse_mode='HTML',
+                reply_markup=admin_menu()
+            )
+        elif call.data == "admin_commands":
+            if call.from_user.id != ADMIN_ID:
+                return
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=(
+                    "🛠 <b>АДМИН-КОМАНДЫ</b>\n\n"
+                    "/stats — статистика\n"
+                    "/users — список пользователей\n"
+                    "/broadcast [текст] — рассылка\n"
+                    "/say [текст] — сообщение от бота"
+                ),
+                parse_mode='HTML',
+                reply_markup=admin_menu()
+            )
+
         bot.answer_callback_query(call.id)
     except Exception as e:
         logger.error(f"Ошибка callback: {e}")
@@ -192,24 +383,6 @@ def send_faq(chat_id, edit=False, message_id=None):
         bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=back_menu())
 
 
-# === АДМИН-КОМАНДЫ ===
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ У вас нет доступа.")
-        return
-    bot.reply_to(message, "📊 <b>СТАТИСТИКА</b>\n\nБот работает стабильно.", parse_mode='HTML')
-
-
-@bot.message_handler(commands=['say'])
-def say_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    text = message.text.replace('/say ', '', 1)
-    if text:
-        bot.send_message(message.chat.id, text, parse_mode='HTML')
-
-
 # === ПРИЁМ СООБЩЕНИЙ ===
 @bot.message_handler(func=lambda message: True)
 def echo_handler(message):
@@ -221,7 +394,7 @@ def echo_handler(message):
         )
 
 
-# === ВЕБХУК ДЛЯ RENDER ===
+# === ВЕБХУК ===
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def get_message():
     try:
@@ -238,7 +411,6 @@ def get_message():
 def webhook():
     try:
         bot.remove_webhook()
-        # ВАЖНО: allowed_updates — разрешаем все типы обновлений, включая callback_query
         result = bot.set_webhook(
             url=WEBHOOK_URL + "/" + BOT_TOKEN,
             allowed_updates=["message", "callback_query", "edited_message", "channel_post"]
@@ -259,5 +431,6 @@ def health():
 # === ЗАПУСК ===
 if __name__ == "__main__":
     import os
+    init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
