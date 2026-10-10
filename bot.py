@@ -1,12 +1,11 @@
-import os
 import logging
 import telebot
 from flask import Flask, request
 
-# === НАСТРОЙКИ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# === НАСТРОЙКИ (ВПИСАНЫ В КОД) ===
+BOT_TOKEN = "8337839229:AAH7EuRNbQK2xn74o1WiDa-TxZHdDA795tg"
+WEBHOOK_URL = "https://piar-bot-5zlx.onrender.com"
+ADMIN_ID = 8718572838
 
 # === ЛОГИ ===
 logging.basicConfig(level=logging.INFO)
@@ -232,13 +231,15 @@ def get_message():
 
 @app.route("/")
 def webhook():
-    if not WEBHOOK_URL:
-        return "WEBHOOK_URL не установлен", 500
-    bot.remove_webhook()
-    result = bot.set_webhook(url=WEBHOOK_URL + BOT_TOKEN)
-    if result:
-        return "Webhook установлен!", 200
-    return "Ошибка установки вебхука", 500
+    try:
+        bot.remove_webhook()
+        result = bot.set_webhook(url=WEBHOOK_URL + "/" + BOT_TOKEN)
+        if result:
+            return f"Webhook установлен на {WEBHOOK_URL}/{BOT_TOKEN}", 200
+        return "Ошибка установки вебхука", 500
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {e}")
+        return f"Ошибка: {e}", 500
 
 
 @app.route("/health")
@@ -248,5 +249,6 @@ def health():
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
+    import os
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
