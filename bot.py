@@ -8,20 +8,28 @@ BOT_TOKEN = "8337839229:AAH7EuRNbQK2xn74o1WiDa-TxZHdDA795tg"
 WEBHOOK_URL = "https://piar-bot-5zlx.onrender.com"
 ADMIN_ID = 8718572838
 
-# === ЛОГИ ===
-logging.basicConfig(level=logging.INFO)
+# === ЛОГИ (только ошибки) ===
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# === БОТ И FLASK ===
-bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+# === БОТ (threaded=True для скорости) ===
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+
+# === FLASK (без логирования запросов) ===
 app = Flask(__name__)
+app.logger.disabled = True
+logging.getLogger('werkzeug').disabled = True
 
 # === БАЗА ДАННЫХ ===
 DB_PATH = "/tmp/users.db"
 
 
+def get_db():
+    return sqlite3.connect(DB_PATH, timeout=5)
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -48,7 +56,7 @@ def init_db():
 
 def add_user(user):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
@@ -61,7 +69,7 @@ def add_user(user):
 
 
 def get_all_users():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users")
     users = [row[0] for row in cursor.fetchall()]
@@ -70,7 +78,7 @@ def get_all_users():
 
 
 def get_users_count():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
     count = cursor.fetchone()[0]
@@ -79,7 +87,7 @@ def get_users_count():
 
 
 def create_order(user_id, username, service, price):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO orders (user_id, username, service, price) VALUES (?, ?, ?, ?)",
@@ -92,7 +100,7 @@ def create_order(user_id, username, service, price):
 
 
 def get_orders(limit=20):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT id, user_id, username, service, price, status, created_at FROM orders ORDER BY id DESC LIMIT ?",
@@ -104,7 +112,7 @@ def get_orders(limit=20):
 
 
 def update_order_status(order_id, status):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
     conn.commit()
@@ -112,7 +120,7 @@ def update_order_status(order_id, status):
 
 
 def get_order(order_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT id, user_id, username, service, price, status FROM orders WHERE id = ?", (order_id,))
     order = cursor.fetchone()
@@ -172,7 +180,7 @@ def article_order():
         "📩 <b>ЗАКАЗ ПИАРА</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "Выбери услугу ниже 👇\n\n"
-        "После выбора бот пришлёт контакт админа для заказа."
+        "После выбора бот пришлёт контакт админа."
     )
 
 
@@ -180,10 +188,11 @@ def article_faq():
     return (
         "❓ <b>FAQ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>Как заказать?</b> — Напишите @MaleficentR7.\n\n"
+        "<b>Как заказать?</b> — /order\n\n"
         "<b>Сколько ждать?</b> — До 24 часов.\n\n"
-        "<b>Как оплатить?</b> — Переводом на ЮMoney. Реквизиты у админа.\n\n"
-        "📩 Не нашёл ответ? Напиши нам!"
+        "<b>Как оплатить?</b> — Переводом на ЮMoney. Реквизиты у @MaleficentR7.\n\n"
+        "<b>Какие проекты запрещены?</b> — 18+, скам, читы.\n\n"
+        "📩 Не нашёл ответ? Пиши @MaleficentR7"
     )
 
 
@@ -196,7 +205,7 @@ def article_contact():
         "📢 <b>Telegram-канал:</b>\n"
         "@BeanRussiaOnline\n\n"
         "💬 <b>Чат ВК:</b>\n"
-        "https://vk.me/join/kuBhzS34RI7dc8140qevGBk11iBjwb8mcGk=\n\n"
+        "vk.me/join/kuBhzS34RI7dc8140qevGBk11iBjwb8mcGk=\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📩 Пиши — ответим в течение 1-2 часов!"
     )
@@ -268,6 +277,7 @@ def admin_menu():
         telebot.types.InlineKeyboardButton("👥 Пользователи", callback_data="admin_users"),
         telebot.types.InlineKeyboardButton("📋 Заказы", callback_data="admin_orders"),
         telebot.types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
+        telebot.types.InlineKeyboardButton("🛠 Команды", callback_data="admin_commands"),
         telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="back"),
     )
     return markup
@@ -288,7 +298,15 @@ def start_command(message):
 @bot.message_handler(commands=['help'])
 def help_command(message):
     bot.send_message(message.chat.id,
-        "🆘 /start — меню\n/about — о проекте\n/rules — правила\n/price — прайс\n/order — заказать\n/contact — контакты\n/faq — FAQ",
+        "🆘 <b>КОМАНДЫ</b>\n\n"
+        "/start — меню\n"
+        "/about — о проекте\n"
+        "/rules — правила\n"
+        "/price — прайс\n"
+        "/order — заказать\n"
+        "/contact — контакты\n"
+        "/faq — FAQ\n"
+        "/help — справка",
         parse_mode='HTML')
 
 
@@ -355,8 +373,7 @@ def myorders_command(message):
         oid, uid, uname, service, price, status, date = o
         status_emoji = "⏳" if status == "pending" else ("✅" if status == "confirmed" else "🎉")
         text += f"{status_emoji} <b>№{oid}</b> | {service} | {price}₽\n"
-        text += f"    👤 @{uname or uid}\n"
-        text += f"    📅 {date[:16]}\n\n"
+        text += f"    👤 @{uname or uid}\n\n"
     bot.send_message(message.chat.id, text, parse_mode='HTML')
 
 
@@ -375,9 +392,8 @@ def confirm_command(message):
         return
     update_order_status(order_id, "confirmed")
     bot.reply_to(message, f"✅ Заказ №{order_id} подтверждён.")
-    # Уведомление клиенту
     try:
-        bot.send_message(order[1], f"✅ <b>Ваш заказ №{order_id} подтверждён!</b>\n\nМы запустим пиар в ближайшее время.", parse_mode='HTML')
+        bot.send_message(order[1], f"✅ <b>Заказ №{order_id} подтверждён!</b>\n\nМы запустим пиар в ближайшее время.", parse_mode='HTML')
     except Exception:
         pass
 
@@ -397,9 +413,8 @@ def done_command(message):
         return
     update_order_status(order_id, "done")
     bot.reply_to(message, f"🎉 Заказ №{order_id} выполнен.")
-    # Уведомление клиенту
     try:
-        bot.send_message(order[1], f"🎉 <b>Ваш заказ №{order_id} выполнен!</b>\n\nСпасибо за заказ! 🤝", parse_mode='HTML')
+        bot.send_message(order[1], f"🎉 <b>Заказ №{order_id} выполнен!</b>\n\nСпасибо! 🤝", parse_mode='HTML')
     except Exception:
         pass
 
@@ -423,12 +438,19 @@ def broadcast_command(message):
     bot.reply_to(message, f"📢 Отправлено: {success}")
 
 
+@bot.message_handler(commands=['say'])
+def say_command(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.replace('/say ', '', 1)
+    if text:
+        bot.send_message(message.chat.id, text, parse_mode='HTML')
+
+
 # === КНОПКИ ===
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
-        logger.info(f"Callback: {call.data} от {call.from_user.id}")
-
         if call.data == "about":
             bot.edit_message_text(article_about(), call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=menu_after_article())
@@ -451,22 +473,18 @@ def callback_handler(call):
             text = "👋 <b>ПИАР ЧАТ | SAMP | CRMP | MTA</b>\n\n👇 Выбери действие:"
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=main_menu(call.from_user.id))
-
-        # === ЗАКАЗ ===
         elif call.data.startswith("buy_"):
             key = call.data.replace("buy_", "")
             service = SERVICES.get(key)
             if not service:
                 bot.answer_callback_query(call.id, "Услуга не найдена")
                 return
-
             order_id = create_order(
                 call.from_user.id,
                 call.from_user.username or call.from_user.first_name,
                 service["name"],
                 service["price"]
             )
-
             text = (
                 f"📩 <b>ЗАЯВКА №{order_id}</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -475,39 +493,32 @@ def callback_handler(call):
                 f"⏳ Статус: <b>Ожидает подтверждения</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📋 <b>ЧТО ДАЛЬШЕ:</b>\n\n"
-                f"1️⃣ Напиши админу @MaleficentR7\n"
-                f"2️⃣ Укажи номер заявки: <b>№{order_id}</b>\n"
+                f"1️⃣ Напиши @MaleficentR7\n"
+                f"2️⃣ Укажи номер: <b>№{order_id}</b>\n"
                 f"3️⃣ Согласуй детали и оплату\n"
                 f"4️⃣ Мы запустим пиар\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"⚠️ <i>Без подтверждения админа заявка не запускается.</i>"
             )
-
             markup = telebot.types.InlineKeyboardMarkup(row_width=1)
             markup.add(
                 telebot.types.InlineKeyboardButton("📩 Написать админу", url="https://t.me/MaleficentR7"),
                 telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="order"),
             )
-
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=markup)
-
-            # Уведомление админу
             try:
                 bot.send_message(
                     ADMIN_ID,
                     f"🆕 <b>НОВАЯ ЗАЯВКА №{order_id}</b>\n\n"
-                    f"👤 Клиент: @{call.from_user.username or 'без ника'}\n"
-                    f"🆔 ID: <code>{call.from_user.id}</code>\n"
-                    f"🛠 Услуга: {service['name']}\n"
-                    f"💰 Сумма: {service['price']}₽\n\n"
-                    f"Для подтверждения: /confirm {order_id}",
+                    f"👤 @{call.from_user.username or 'без ника'}\n"
+                    f"🆔 <code>{call.from_user.id}</code>\n"
+                    f"🛠 {service['name']}\n"
+                    f"💰 {service['price']}₽\n\n"
+                    f"/confirm {order_id}",
                     parse_mode='HTML'
                 )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления: {e}")
-
-        # === АДМИН-ПАНЕЛЬ ===
+            except Exception:
+                pass
         elif call.data == "admin_panel":
             if call.from_user.id != ADMIN_ID:
                 bot.answer_callback_query(call.id, "❌ Доступ запрещён.")
@@ -541,8 +552,7 @@ def callback_handler(call):
                 for o in orders:
                     oid, uid, uname, service, price, status, date = o
                     status_emoji = "⏳" if status == "pending" else ("✅" if status == "confirmed" else "🎉")
-                    text += f"{status_emoji} <b>№{oid}</b> | {service} | {price}₽\n"
-                    text += f"    👤 @{uname or uid}\n\n"
+                    text += f"{status_emoji} <b>№{oid}</b> | {service} | {price}₽\n\n"
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=admin_menu())
         elif call.data == "admin_broadcast":
@@ -550,11 +560,25 @@ def callback_handler(call):
                 return
             bot.edit_message_text("📢 /broadcast [текст]", call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=admin_menu())
-
+        elif call.data == "admin_commands":
+            if call.from_user.id != ADMIN_ID:
+                return
+            bot.edit_message_text(
+                "🛠 <b>КОМАНДЫ</b>\n\n"
+                "/stats — статистика\n"
+                "/users — пользователи\n"
+                "/myorders — заказы\n"
+                "/confirm [id] — подтвердить\n"
+                "/done [id] — выполнено\n"
+                "/broadcast [текст] — рассылка\n"
+                "/say [текст] — сообщение",
+                call.message.chat.id, call.message.message_id,
+                parse_mode='HTML', reply_markup=admin_menu()
+            )
         bot.answer_callback_query(call.id)
     except Exception as e:
         logger.error(f"Ошибка callback: {e}")
-        bot.answer_callback_query(call.id, "Ошибка. Попробуйте позже.")
+        bot.answer_callback_query(call.id, "Ошибка")
 
 
 # === ПРИЁМ СООБЩЕНИЙ ===
@@ -602,4 +626,4 @@ if __name__ == "__main__":
     import os
     init_db()
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
