@@ -1,8 +1,10 @@
 import logging
 import sqlite3
 import telebot
+import threading
+import time
+from datetime import datetime
 from flask import Flask, request
-from datetime import datetime, timedelta
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = "8337839229:AAH7EuRNbQK2xn74o1WiDa-TxZHdDA795tg"
@@ -14,7 +16,6 @@ logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
-
 app = Flask(__name__)
 app.logger.disabled = True
 logging.getLogger('werkzeug').disabled = True
@@ -54,6 +55,16 @@ def init_db():
     ]
     for key, name, price, enabled in default_services:
         c.execute("INSERT OR IGNORE INTO services VALUES (?, ?, ?, ?)", (key, name, price, enabled))
+    # Настройки по умолчанию для графика
+    default_settings = [
+        ("schedule_enabled", "0"),
+        ("schedule_open", "09:00"),
+        ("schedule_close", "23:00"),
+        ("schedule_days", "1,2,3,4,5,6,7"),  # 1=Пн, 7=Вс
+        ("bot_status", "open"),
+    ]
+    for key, value in default_settings:
+        c.execute("INSERT OR IGNORE INTO settings VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
 
@@ -196,9 +207,71 @@ def delete_promo(code):
     conn.commit(); conn.close()
 
 
-# === СТАТУС БОТА ===
-def set_bot_status(s): set_setting("bot_status", s)
-def get_bot_status(): return get_setting("bot_status", "open")
+# === ГРАФИК РАБОТЫ ===
+def is_working_hours():
+    """Проверяет, работает ли бот сейчас по графику."""
+    if get_setting("schedule_enabled", "0") != "1":
+        return True  # Если график выключен — бот работает всегда
+
+    now = datetime.now()
+    # День недели: 1=Пн, 7=Вс
+    weekday = now.isoweekday()
+    allowed_days = [int(d) for d in get_setting("schedule_days", "1,2,3,4,5,6,7").split(",")]
+
+    if weekday not in allowed_days:
+        return False  # Выходной день
+
+    # Время работы
+    try:
+        open_time = datetime.strptime(get_setting("schedule_open", "09:00"), "%H:%M").time()
+        close_time = datetime.strptime(get_setting("schedule_close", "23:00"), "%H:%M").time()
+        current = now.time()
+
+        if open_time <= close_time:
+            return open_time <= current <= close_time
+        else:
+            # Ночная смена (например, с 22:00 до 06:00)
+            return current >= open_time or current <= close_time
+    except Exception as e:
+        logger.error(f"Ошибка графика: {e}")
+        return True
+
+
+def get_bot_status():
+    """Возвращает статус бота с учётом графика."""
+    if not is_working_hours():
+        return "closed"
+    return get_setting("bot_status", "open")
+
+
+def set_bot_status(status):
+    set_setting("bot_status", status)
+
+
+# === ПЛАНИРОВЩИК ===
+def scheduler():
+    """Фоновый поток: каждую минуту проверяет график и обновляет статус."""
+    last_status = None
+    while True:
+        try:
+            if get_setting("schedule_enabled", "0") == "1":
+                should_work = is_working_hours()
+                current_status = "open" if should_work else "closed"
+
+                if current_status != last_status:
+                    set_setting("bot_status", current_status)
+                    last_status = current_status
+                    logger.warning(f"⏰ Бот автоматически {current_status}")
+            time.sleep(60)  # Проверка раз в минуту
+        except Exception as e:
+            logger.error(f"Ошибка планировщика: {e}")
+            time.sleep(60)
+
+
+def start_scheduler():
+    """Запускает планировщик в отдельном потоке."""
+    thread = threading.Thread(target=scheduler, daemon=True)
+    thread.start()
 
 
 # === ТЕКСТЫ ===
@@ -210,16 +283,14 @@ def article_about():
     return get_text("about",
         "📖 <b>О ПРОЕКТЕ ПИАР ЧАТ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "ПИАР ЧАТ — это сервис продвижения игровых проектов на платформах <b>SAMP</b>, <b>CRMP</b> и <b>MTA</b>.\n\n"
-        "Мы размещаем рекламу твоего проекта в сети активных пиар-чатов, где сидят реальные игроки.\n\n"
+        "ПИАР ЧАТ — сервис продвижения игровых проектов на <b>SAMP</b>, <b>CRMP</b> и <b>MTA</b>.\n\n"
         "🔥 <b>НАШИ ПРЕИМУЩЕСТВА:</b>\n\n"
         "✅ Опытная команда\n"
         "✅ Честные правила\n"
         "✅ Быстрая поддержка\n"
         "✅ Гибкие цены от 20₽\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📩 Админ: @MaleficentR7\n"
-        "📢 Канал: @BeanRussiaOnline"
+        "📩 Админ: @MaleficentR7"
     )
 
 
@@ -227,18 +298,11 @@ def article_rules():
     return get_text("rules",
         "📜 <b>ПРАВИЛА ПИАР ЧАТА</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>1️⃣ УВАЖЕНИЕ</b>\n"
-        "Не оскорбляй других участников, не разжигай конфликты.\n\n"
-        "<b>2️⃣ БЕЗ СПАМА</b>\n"
-        "Пиар только по правилам. Флуд запрещён.\n\n"
-        "<b>3️⃣ БЕЗ 18+</b>\n"
-        "Контент для взрослых запрещён.\n\n"
-        "<b>4️⃣ БЕЗ СТОРОННИХ ССЫЛОК</b>\n"
-        "Только согласованная реклама.\n\n"
-        "<b>5️⃣ ПОДЧИНЯЙСЯ АДМИНАМ</b>\n"
-        "Решения администрации окончательны.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚠️ <b>За нарушение:</b> мут или бан без предупреждения.\n\n"
+        "<b>1️⃣ УВАЖЕНИЕ</b> — не оскорбляй других.\n\n"
+        "<b>2️⃣ БЕЗ СПАМА</b> — пиар только по правилам.\n\n"
+        "<b>3️⃣ БЕЗ 18+</b> — контент для взрослых запрещён.\n\n"
+        "<b>4️⃣ БЕЗ СТОРОННИХ ССЫЛОК</b> — только согласованная реклама.\n\n"
+        "<b>5️⃣ ПОДЧИНЯЙСЯ АДМИНАМ</b> — решения окончательны.\n\n"
         "📩 Вопросы — @MaleficentR7"
     )
 
@@ -247,18 +311,11 @@ def article_faq():
     return get_text("faq",
         "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>— Как заказать?</b>\n"
-        "Напиши @MaleficentR7.\n\n"
-        "<b>— Сколько ждать?</b>\n"
-        "До 24 часов.\n\n"
-        "<b>— Как оплатить?</b>\n"
-        "Переводом на ЮMoney.\n\n"
-        "<b>— Можно ли бесплатно?</b>\n"
-        "Да, если проект подходит под правила.\n\n"
-        "<b>— Какие проекты запрещены?</b>\n"
-        "18+, скам, читы.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📩 Не нашёл ответ? Пиши @MaleficentR7"
+        "<b>— Как заказать?</b> — Напиши @MaleficentR7.\n"
+        "<b>— Сколько ждать?</b> — До 24 часов.\n"
+        "<b>— Как оплатить?</b> — Переводом на ЮMoney.\n"
+        "<b>— Можно ли бесплатно?</b> — Да, если проект подходит под правила.\n\n"
+        "📩 @MaleficentR7"
     )
 
 
@@ -266,13 +323,9 @@ def article_contact():
     return get_text("contact",
         "📞 <b>КОНТАКТЫ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🛡 <b>Администратор:</b>\n"
-        "@MaleficentR7\n\n"
-        "📢 <b>Telegram-канал:</b>\n"
-        "@BeanRussiaOnline\n\n"
-        "💬 <b>Чат ВК:</b>\n"
-        "vk.me/join/kuBhzS34RI7dc8140qevGBk11iBjwb8mcGk=\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🛡 <b>Админ:</b> @MaleficentR7\n"
+        "📢 <b>Канал:</b> @BeanRussiaOnline\n"
+        "💬 <b>Чат ВК:</b> vk.me/join/kuBhzS34RI7dc8140qevGBk11iBjwb8mcGk=\n\n"
         "📩 Пиши — ответим в течение 1-2 часов!"
     )
 
@@ -284,9 +337,6 @@ def article_price():
         if s["enabled"]:
             text += f"{s['name']} — <b>{s['price']}₽</b>\n"
     text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    text += "💎 <b>Скидки:</b>\n"
-    text += "🔸 От 3 заказов — 10%\n"
-    text += "🔸 Постоянным клиентам — 20%\n\n"
     text += "🎁 Есть промокод? Введи его при заказе!\n\n"
     text += "📩 Заказать: /order"
     return text
@@ -296,9 +346,7 @@ def article_order():
     return (
         "📩 <b>ЗАКАЗ ПИАРА</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Выбери услугу ниже 👇\n\n"
-        "🎁 <b>Есть промокод?</b>\n"
-        "Напиши его после выбора услуги."
+        "Выбери услугу ниже 👇"
     )
 
 
@@ -353,9 +401,12 @@ def main_menu(user_id):
 def admin_menu():
     status = get_bot_status()
     status_text = "🔓 Открыт" if status == "open" else "🔒 Закрыт"
+    schedule_enabled = get_setting("schedule_enabled", "0") == "1"
+    schedule_text = "🟢 Вкл" if schedule_enabled else "🔴 Выкл"
     m = telebot.types.InlineKeyboardMarkup(row_width=1)
     m.add(
         telebot.types.InlineKeyboardButton(f"📊 Статус: {status_text}", callback_data="admin_status"),
+        telebot.types.InlineKeyboardButton(f"⏰ График: {schedule_text}", callback_data="admin_schedule"),
         telebot.types.InlineKeyboardButton("💰 Управление ценами", callback_data="admin_prices"),
         telebot.types.InlineKeyboardButton("🛠 Управление услугами", callback_data="admin_services"),
         telebot.types.InlineKeyboardButton("🎁 Промокоды", callback_data="admin_promos"),
@@ -372,21 +423,28 @@ def admin_menu():
 @bot.message_handler(commands=['start'])
 def start_command(message):
     if get_bot_status() == "closed" and message.from_user.id != ADMIN_ID:
-        bot.send_message(message.chat.id,
-            "🔒 <b>Бот временно закрыт</b>\n\n"
-            "Мы проводим техническое обслуживание.\n\n"
-            "📢 Новости: @BeanRussiaOnline\n"
-            "📩 Срочно: @MaleficentR7",
-            parse_mode='HTML')
+        # Показываем время работы, если график включён
+        if get_setting("schedule_enabled", "0") == "1":
+            open_time = get_setting("schedule_open", "09:00")
+            close_time = get_setting("schedule_close", "23:00")
+            bot.send_message(message.chat.id,
+                f"🔒 <b>Бот сейчас закрыт</b>\n\n"
+                f"⏰ Мы работаем с <b>{open_time}</b> до <b>{close_time}</b>.\n\n"
+                f"📢 Следите за новостями: @BeanRussiaOnline\n"
+                f"📩 Срочно: @MaleficentR7",
+                parse_mode='HTML')
+        else:
+            bot.send_message(message.chat.id,
+                "🔒 <b>Бот временно закрыт</b>\n\n"
+                "📢 Новости: @BeanRussiaOnline\n"
+                "📩 Срочно: @MaleficentR7",
+                parse_mode='HTML')
         return
     add_user(message.from_user)
     text = (
         "👋 <b>Добро пожаловать в ПИАР ЧАТ | SAMP | CRMP | MTA!</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📌 Здесь ты можешь:\n\n"
-        "• Заказать пиар своего проекта\n"
-        "• Узнать правила и прайс\n"
-        "• Ввести промокод на скидку\n\n"
+        "📌 Здесь ты можешь заказать пиар своего проекта.\n\n"
         "👇 <b>Выбери действие:</b>"
     )
     bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=main_menu(message.from_user.id))
@@ -396,14 +454,8 @@ def start_command(message):
 def help_command(message):
     bot.send_message(message.chat.id,
         "🆘 <b>КОМАНДЫ</b>\n\n"
-        "🏠 /start — меню\n"
-        "📖 /about — о проекте\n"
-        "💰 /price — прайс\n"
-        "📩 /order — заказать\n"
-        "📜 /rules — правила\n"
-        "❓ /faq — FAQ\n"
-        "📞 /contact — контакты\n"
-        "🆘 /help — справка",
+        "/start — меню\n/about — о проекте\n/price — прайс\n/order — заказать\n"
+        "/rules — правила\n/faq — FAQ\n/contact — контакты",
         parse_mode='HTML')
 
 
@@ -443,7 +495,7 @@ def close_command(message):
     if message.from_user.id != ADMIN_ID:
         return
     set_bot_status("closed")
-    bot.reply_to(message, "🔒 <b>Бот закрыт.</b>", parse_mode='HTML')
+    bot.reply_to(message, "🔒 <b>Бот закрыт вручную.</b>", parse_mode='HTML')
 
 
 @bot.message_handler(commands=['open'])
@@ -451,7 +503,7 @@ def open_command(message):
     if message.from_user.id != ADMIN_ID:
         return
     set_bot_status("open")
-    bot.reply_to(message, "🔓 <b>Бот открыт.</b>", parse_mode='HTML')
+    bot.reply_to(message, "🔓 <b>Бот открыт вручную.</b>", parse_mode='HTML')
 
 
 @bot.message_handler(commands=['stats'])
@@ -497,7 +549,7 @@ def confirm_command(message):
     update_order_status(oid, "confirmed")
     bot.reply_to(message, f"✅ Заказ №{oid} подтверждён.")
     try:
-        bot.send_message(order[1], f"✅ <b>Заказ №{oid} подтверждён!</b>\n\nЗапускаем пиар в ближайшее время.", parse_mode='HTML')
+        bot.send_message(order[1], f"✅ <b>Заказ №{oid} подтверждён!</b>\n\nЗапускаем пиар.", parse_mode='HTML')
     except Exception:
         pass
 
@@ -518,7 +570,7 @@ def done_command(message):
     update_order_status(oid, "done")
     bot.reply_to(message, f"🎉 Заказ №{oid} выполнен.")
     try:
-        bot.send_message(order[1], f"🎉 <b>Заказ №{oid} выполнен!</b>\n\nСпасибо! 🤝", parse_mode='HTML')
+        bot.send_message(order[1], f"🎉 <b>Заказ №{oid} выполнен!</b>\n\nСпасибо!", parse_mode='HTML')
     except Exception:
         pass
 
@@ -560,26 +612,35 @@ def handle_promo_input(message):
             return
         code, discount, max_uses = parts[0], int(parts[1]), int(parts[2])
         if create_promo(code, discount, max_uses):
-            bot.reply_to(message, f"✅ Промокод <b>{code.upper()}</b> создан!\n\n"
-                                  f"💰 Скидка: {discount}%\n"
-                                  f"📊 Лимит: {max_uses}", parse_mode='HTML')
+            bot.reply_to(message, f"✅ Промокод <b>{code.upper()}</b> создан!\n💰 {discount}%\n📊 {max_uses}", parse_mode='HTML')
         else:
             bot.reply_to(message, "❌ Такой промокод уже существует.")
     except ValueError:
         bot.reply_to(message, "❌ Неверный формат.")
 
 
-@bot.message_handler(func=lambda m: m.from_user.id != ADMIN_ID and m.reply_to_message is None and
-                                   get_setting(f"waiting_promo_{m.from_user.id}") == "yes")
-def handle_promo_apply(message):
-    code = message.text.strip().upper()
-    discount = check_promo(code)
-    if discount:
-        set_setting(f"promo_{message.from_user.id}", code)
-        bot.reply_to(message, f"✅ Промокод <b>{code}</b> применён!\n\n💰 Скидка: <b>{discount}%</b>", parse_mode='HTML')
-    else:
-        bot.reply_to(message, f"❌ Промокод <b>{code}</b> не найден или неактивен.", parse_mode='HTML')
-    set_setting(f"waiting_promo_{message.from_user.id}", "no")
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.reply_to_message and
+                                   m.reply_to_message.text and "Введите график" in m.reply_to_message.text)
+def handle_schedule_input(message):
+    """Обработка настройки графика: '09:00 23:00 1,2,3,4,5'."""
+    try:
+        parts = message.text.strip().split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Формат: ОТКРЫТИЕ ЗАКРЫТИЕ [ДНИ]\nПример: 09:00 23:00 1,2,3,4,5")
+            return
+        open_time = parts[0]
+        close_time = parts[1]
+        days = parts[2] if len(parts) > 2 else "1,2,3,4,5,6,7"
+
+        set_setting("schedule_open", open_time)
+        set_setting("schedule_close", close_time)
+        set_setting("schedule_days", days)
+        set_setting("schedule_enabled", "1")
+
+        bot.reply_to(message, f"✅ График установлен!\n\n⏰ {open_time} – {close_time}\n📅 Дни: {days}\n\nБот будет автоматически открываться и закрываться.",
+                     parse_mode='HTML')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 
 # === CALLBACK ===
@@ -589,7 +650,7 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
 
         if get_bot_status() == "closed" and call.from_user.id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "🔒 Бот на техническом обслуживании", show_alert=True)
+            bot.answer_callback_query(call.id, "🔒 Бот закрыт. Заходите в рабочее время.", show_alert=True)
             return
 
         if call.data == "about":
@@ -615,48 +676,23 @@ def callback_handler(call):
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=main_menu(call.from_user.id))
         elif call.data == "enter_promo":
-            set_setting(f"waiting_promo_{call.from_user.id}", "yes")
-            bot.send_message(call.message.chat.id,
-                "🎁 <b>ВВЕДИ ПРОМОКОД</b>\n\n"
-                "Отправь его следующим сообщением.",
-                parse_mode='HTML')
+            bot.send_message(call.message.chat.id, "🎁 <b>ВВЕДИ ПРОМОКОД</b>\n\nОтправь его следующим сообщением.",
+                             parse_mode='HTML')
         elif call.data.startswith("buy_"):
             key = call.data.replace("buy_", "")
             services = get_services()
             service = services.get(key)
             if not service:
                 return
-
-            # Проверка промокода
-            promo_code = get_setting(f"promo_{call.from_user.id}")
-            price = service["price"]
-            promo_text = ""
-
-            if promo_code:
-                discount = check_promo(promo_code)
-                if discount:
-                    new_price = int(price * (100 - discount) / 100)
-                    promo_text = f"\n🎁 Промокод: <b>{promo_code}</b> (-{discount}%)\n💰 Было: <s>{price}₽</s>\n💵 Стало: <b>{new_price}₽</b>"
-                    price = new_price
-                    use_promo(promo_code)
-                    set_setting(f"promo_{call.from_user.id}", "")
-
             order_id = create_order(call.from_user.id,
                                     call.from_user.username or call.from_user.first_name,
-                                    service["name"], price)
+                                    service["name"], service["price"])
             text = (
                 f"📩 <b>ЗАЯВКА №{order_id}</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"🛠 Услуга: {service['name']}\n"
-                f"💰 Сумма: <b>{price}₽</b>{promo_text}\n"
-                f"⏳ Статус: <b>Ожидает подтверждения</b>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📋 <b>ЧТО ДАЛЬШЕ:</b>\n\n"
-                f"1️⃣ Напиши @MaleficentR7\n"
-                f"2️⃣ Укажи номер: <b>№{order_id}</b>\n"
-                f"3️⃣ Согласуй детали и оплату\n"
-                f"4️⃣ Мы запустим пиар\n\n"
-                f"⚠️ <i>Без подтверждения админа заявка не запускается.</i>"
+                f"💰 Сумма: <b>{service['price']}₽</b>\n\n"
+                f"📋 Напиши @MaleficentR7 с номером <b>№{order_id}</b>"
             )
             markup = telebot.types.InlineKeyboardMarkup(row_width=1)
             markup.add(
@@ -669,9 +705,8 @@ def callback_handler(call):
                 bot.send_message(ADMIN_ID,
                     f"🆕 <b>НОВАЯ ЗАЯВКА №{order_id}</b>\n\n"
                     f"👤 @{call.from_user.username or 'без ника'}\n"
-                    f"🆔 <code>{call.from_user.id}</code>\n"
                     f"🛠 {service['name']}\n"
-                    f"💰 {price}₽{promo_text}\n\n"
+                    f"💰 {service['price']}₽\n\n"
                     f"/confirm {order_id}",
                     parse_mode='HTML')
             except Exception:
@@ -687,8 +722,65 @@ def callback_handler(call):
             if call.from_user.id != ADMIN_ID:
                 return
             status = get_bot_status()
-            text = f"🔓 Бот <b>открыт</b>\n\nЧтобы закрыть: /close" if status == "open" else f"🔒 Бот <b>закрыт</b>\n\nЧтобы открыть: /open"
+            text = f"🔓 Бот <b>открыт</b>\n\n/close — закрыть" if status == "open" else f"🔒 Бот <b>закрыт</b>\n\n/open — открыть"
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                  parse_mode='HTML', reply_markup=admin_menu())
+        elif call.data == "admin_schedule":
+            if call.from_user.id != ADMIN_ID:
+                return
+            enabled = get_setting("schedule_enabled", "0") == "1"
+            open_t = get_setting("schedule_open", "09:00")
+            close_t = get_setting("schedule_close", "23:00")
+            days = get_setting("schedule_days", "1,2,3,4,5,6,7")
+            status = "🟢 Включён" if enabled else "🔴 Выключен"
+
+            text = (
+                f"⏰ <b>ГРАФИК РАБОТЫ</b>\n\n"
+                f"Статус: {status}\n"
+                f"Открытие: <b>{open_t}</b>\n"
+                f"Закрытие: <b>{close_t}</b>\n"
+                f"Дни: {days}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Чтобы изменить — нажми кнопку ниже и ответь на сообщение.\n"
+                f"Формат: <code>09:00 23:00 1,2,3,4,5</code>\n"
+                f"(дни: 1=Пн, 7=Вс)"
+            )
+            m = telebot.types.InlineKeyboardMarkup(row_width=1)
+            m.add(
+                telebot.types.InlineKeyboardButton("✏️ Изменить график", callback_data="edit_schedule"),
+                telebot.types.InlineKeyboardButton("🔴 Выключить график", callback_data="disable_schedule"),
+                telebot.types.InlineKeyboardButton("🟢 Включить график", callback_data="enable_schedule"),
+                telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel"),
+            )
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                  parse_mode='HTML', reply_markup=m)
+        elif call.data == "edit_schedule":
+            if call.from_user.id != ADMIN_ID:
+                return
+            bot.edit_message_text(
+                "⏰ <b>ИЗМЕНЕНИЕ ГРАФИКА</b>\n\n"
+                "Ответьте на это сообщение в формате:\n"
+                "<code>ОТКРЫТИЕ ЗАКРЫТИЕ ДНИ</code>\n\n"
+                "Примеры:\n"
+                "• <code>09:00 23:00 1,2,3,4,5</code> — будни\n"
+                "• <code>10:00 22:00 1,2,3,4,5,6,7</code> — каждый день\n"
+                "• <code>00:00 23:59 1,2,3,4,5,6,7</code> — круглосуточно\n\n"
+                "📝 Введите график — ответьте на это сообщение.",
+                call.message.chat.id, call.message.message_id, parse_mode='HTML')
+        elif call.data == "disable_schedule":
+            if call.from_user.id != ADMIN_ID:
+                return
+            set_setting("schedule_enabled", "0")
+            set_bot_status("open")
+            bot.edit_message_text("🔴 <b>График выключен.</b>\n\nБот работает круглосуточно.",
+                                  call.message.chat.id, call.message.message_id,
+                                  parse_mode='HTML', reply_markup=admin_menu())
+        elif call.data == "enable_schedule":
+            if call.from_user.id != ADMIN_ID:
+                return
+            set_setting("schedule_enabled", "1")
+            bot.edit_message_text("🟢 <b>График включён!</b>\n\nБот будет автоматически открываться/закрываться.",
+                                  call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=admin_menu())
         elif call.data == "admin_prices":
             if call.from_user.id != ADMIN_ID:
@@ -698,7 +790,7 @@ def callback_handler(call):
             for key, s in services.items():
                 m.add(telebot.types.InlineKeyboardButton(f"{s['name']} — {s['price']}₽", callback_data=f"editprice_{key}"))
             m.add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel"))
-            bot.edit_message_text("💰 <b>УПРАВЛЕНИЕ ЦЕНАМИ</b>\n\nВыбери услугу:",
+            bot.edit_message_text("💰 <b>УПРАВЛЕНИЕ ЦЕНАМИ</b>",
                                   call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=m)
         elif call.data.startswith("editprice_"):
@@ -713,7 +805,7 @@ def callback_handler(call):
                 f"💰 <b>Изменение цены</b>\n\n"
                 f"Услуга: {s['name']}\n"
                 f"Текущая цена: <b>{s['price']}₽</b>\n\n"
-                f"📝 Введите новую цену — ответьте на это сообщение числом.\n"
+                f"📝 Введите новую цену — ответьте на это сообщение.\n"
                 f"KEY:{key}",
                 call.message.chat.id, call.message.message_id, parse_mode='HTML')
         elif call.data == "admin_services":
@@ -722,10 +814,10 @@ def callback_handler(call):
             services = get_services()
             m = telebot.types.InlineKeyboardMarkup(row_width=1)
             for key, s in services.items():
-                status = "✅" if s["enabled"] else "❌"
-                m.add(telebot.types.InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"toggle_{key}"))
+                st = "✅" if s["enabled"] else "❌"
+                m.add(telebot.types.InlineKeyboardButton(f"{st} {s['name']}", callback_data=f"toggle_{key}"))
             m.add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel"))
-            bot.edit_message_text("🛠 <b>УПРАВЛЕНИЕ УСЛУГАМИ</b>\n\nНажми — вкл/выкл:",
+            bot.edit_message_text("🛠 <b>УПРАВЛЕНИЕ УСЛУГАМИ</b>",
                                   call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=m)
         elif call.data.startswith("toggle_"):
@@ -736,8 +828,8 @@ def callback_handler(call):
             services = get_services()
             m = telebot.types.InlineKeyboardMarkup(row_width=1)
             for k, s in services.items():
-                status = "✅" if s["enabled"] else "❌"
-                m.add(telebot.types.InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"toggle_{k}"))
+                st = "✅" if s["enabled"] else "❌"
+                m.add(telebot.types.InlineKeyboardButton(f"{st} {s['name']}", callback_data=f"toggle_{k}"))
             m.add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel"))
             bot.edit_message_text("🛠 <b>УПРАВЛЕНИЕ УСЛУГАМИ</b>",
                                   call.message.chat.id, call.message.message_id,
@@ -756,8 +848,6 @@ def callback_handler(call):
                 text += "Пока нет промокодов.\n"
             m = telebot.types.InlineKeyboardMarkup(row_width=1)
             m.add(telebot.types.InlineKeyboardButton("➕ Создать промокод", callback_data="create_promo"))
-            if promos:
-                m.add(telebot.types.InlineKeyboardButton("🗑 Удалить все", callback_data="delete_all_promos"))
             m.add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel"))
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=m)
@@ -766,21 +856,11 @@ def callback_handler(call):
                 return
             bot.edit_message_text(
                 "🎁 <b>СОЗДАНИЕ ПРОМОКОДА</b>\n\n"
-                "Отправьте сообщение в формате:\n\n"
+                "Ответьте на это сообщение в формате:\n"
                 "<code>КОД СКИДКА ЛИМИТ</code>\n\n"
-                "Пример:\n"
-                "<code>START 10 100</code>\n\n"
-                "Это создаст промокод START со скидкой 10% на 100 использований.\n\n"
+                "Пример: <code>START 10 100</code>\n\n"
                 "📝 Введите новый промокод — ответьте на это сообщение.",
                 call.message.chat.id, call.message.message_id, parse_mode='HTML')
-        elif call.data == "delete_all_promos":
-            if call.from_user.id != ADMIN_ID:
-                return
-            for p in get_promos():
-                delete_promo(p[0])
-            bot.edit_message_text("🗑 Все промокоды удалены.",
-                                  call.message.chat.id, call.message.message_id,
-                                  parse_mode='HTML', reply_markup=admin_menu())
         elif call.data == "admin_texts":
             if call.from_user.id != ADMIN_ID:
                 return
@@ -792,7 +872,7 @@ def callback_handler(call):
                 telebot.types.InlineKeyboardButton("📞 Контакты", callback_data="edittext_contact"),
                 telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel"),
             )
-            bot.edit_message_text("📝 <b>РЕДАКТОР ТЕКСТОВ</b>\n\nЧто редактируем?",
+            bot.edit_message_text("📝 <b>РЕДАКТОР ТЕКСТОВ</b>",
                                   call.message.chat.id, call.message.message_id,
                                   parse_mode='HTML', reply_markup=m)
         elif call.data.startswith("edittext_"):
@@ -802,7 +882,7 @@ def callback_handler(call):
             current = get_text(key, "(пусто)")
             bot.edit_message_text(
                 f"📝 <b>Редактирование «{key}»</b>\n\n"
-                f"Текущий текст:\n\n{current[:400]}...\n\n"
+                f"Текущий текст:\n{current[:400]}\n\n"
                 f"📩 Введите новый текст — ответьте на это сообщение.\n"
                 f"KEY:{key}",
                 call.message.chat.id, call.message.message_id, parse_mode='HTML')
@@ -877,5 +957,6 @@ def health():
 if __name__ == "__main__":
     import os
     init_db()
+    start_scheduler()  # Запускаем планировщик
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
