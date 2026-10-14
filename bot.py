@@ -20,6 +20,21 @@ app = Flask(__name__)
 app.logger.disabled = True
 logging.getLogger('werkzeug').disabled = True
 
+# === ДЕКОРАТОР АДМИНА ===
+def admin_only(func):
+    """Декоратор: пропускает только админа, остальным — отказ."""
+    def wrapper(message):
+        if message.from_user.id != ADMIN_ID:
+            bot.reply_to(
+                message,
+                "⛔ <b>Отказано в доступе</b>\n\n"
+                "Эта команда доступна только администратору.",
+                parse_mode='HTML'
+            )
+            return
+        return func(message)
+    return wrapper
+
 # === БАЗА ===
 DB_PATH = "/tmp/users.db"
 
@@ -198,9 +213,20 @@ def use_promo(code):
     conn.commit(); conn.close()
 
 
+def toggle_promo(code):
+    conn = get_db(); c = conn.cursor()
+    c.execute("UPDATE promos SET active = 1 - active WHERE code = ?", (code.upper(),))
+    conn.commit(); conn.close()
+
+
+def delete_promo(code):
+    conn = get_db(); c = conn.cursor()
+    c.execute("DELETE FROM promos WHERE code = ?", (code.upper(),))
+    conn.commit(); conn.close()
+
+
 # === НАКАЗАНИЯ ===
 def add_punishment(user_id, username, ptype, reason, until=None):
-    """Добавить наказание. ptype: mute, ban, permban."""
     conn = get_db(); c = conn.cursor()
     c.execute("INSERT INTO punishments (user_id, username, type, reason, until) VALUES (?, ?, ?, ?, ?)",
               (user_id, username, ptype, reason, until))
@@ -208,35 +234,27 @@ def add_punishment(user_id, username, ptype, reason, until=None):
 
 
 def get_active_punishment(user_id):
-    """Проверить активное наказание пользователя."""
     conn = get_db(); c = conn.cursor()
     c.execute("""SELECT id, type, reason, until FROM punishments 
                  WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1""", (user_id,))
     r = c.fetchone(); conn.close()
-
     if not r:
         return None
-
     pid, ptype, reason, until_str = r
-
-    # Проверка срока
     if until_str:
         try:
             until = datetime.strptime(until_str, "%Y-%m-%d %H:%M:%S")
             if datetime.now() > until:
-                # Срок истёк — снимаем
                 conn = get_db(); c = conn.cursor()
                 c.execute("UPDATE punishments SET active = 0 WHERE id = ?", (pid,))
                 conn.commit(); conn.close()
                 return None
         except Exception:
             pass
-
     return {"id": pid, "type": ptype, "reason": reason, "until": until_str}
 
 
 def remove_punishment(user_id, ptype=None):
-    """Снять наказание. Если ptype=None — снять все."""
     conn = get_db(); c = conn.cursor()
     if ptype:
         c.execute("UPDATE punishments SET active = 0 WHERE user_id = ? AND type = ?", (user_id, ptype))
@@ -261,6 +279,25 @@ def is_muted(user_id):
 def is_banned(user_id):
     p = get_active_punishment(user_id)
     return p and p["type"] in ("ban", "permban")
+
+
+def parse_duration(duration):
+    try:
+        unit = duration[-1].lower()
+        value = int(duration[:-1])
+        if unit == 'm':
+            delta = timedelta(minutes=value)
+        elif unit == 'h':
+            delta = timedelta(hours=value)
+        elif unit == 'd':
+            delta = timedelta(days=value)
+        else:
+            delta = timedelta(hours=1)
+        until = datetime.now() + delta
+        return until.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        until = datetime.now() + timedelta(hours=1)
+        return until.strftime("%Y-%m-%d %H:%M:%S")
 
 
 # === ГРАФИК ===
@@ -333,26 +370,30 @@ def article_about():
 def article_rules():
     return get_text("rules",
         "📜 <b>ПРАВИЛА ПИАР ЧАТА</b>\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Полные правила: /rules\n\n"
+        "1️⃣ Уважение\n2️⃣ Без спама\n3️⃣ Без 18+\n4️⃣ Без сторонних ссылок\n5️⃣ Подчиняйся админам\n\n"
         "📩 Вопросы — @MaleficentR7"
     )
 
 
 def article_faq():
     return get_text("faq",
-        "❓ <b>FAQ</b>\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Как заказать? — /order\n"
-        "Сколько ждать? — До 24 часов\n"
-        "Как оплатить? — @MaleficentR7\n\n"
-        "📩 @MaleficentR7"
+        "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b>\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        "❓ <b>Как заказать?</b>\n1. Напиши @MaleficentR7\n2. Выбери услугу\n3. Оплати\n4. Получи результат\n\n"
+        "❓ <b>Сколько ждать?</b>\nОт 1 до 24 часов.\n\n"
+        "❓ <b>Как оплатить?</b>\nЮMoney, карта, СБП.\n\n"
+        "❓ <b>Есть возврат?</b>\nДа, если услуга не выполнена.\n\n"
+        "❓ <b>Что запрещено?</b>\n18+, скам, читы.\n\n"
+        "📩 Не нашёл ответ? Напиши @MaleficentR7"
     )
 
 
 def article_contact():
     return get_text("contact",
         "📞 <b>КОНТАКТЫ</b>\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🛡 @MaleficentR7\n"
-        "📢 @BeanRussiaOnline"
+        "🛡 <b>Админ:</b> @MaleficentR7\n"
+        "📢 <b>Канал:</b> @BeanRussiaOnline\n"
+        "💬 <b>Чат ВК:</b> vk.me/join/kuBhzS34RI7dc8140qevGBk11iBjwb8mcGk=\n\n"
+        "📩 Пиши — ответим в течение 1-2 часов!"
     )
 
 
@@ -443,10 +484,9 @@ def admin_menu():
     return m
 
 
-# === КОМАНДЫ ===
+# === КОМАНДЫ (ПОЛЬЗОВАТЕЛИ) ===
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    # Проверка бана
     if message.from_user.id != ADMIN_ID:
         p = get_active_punishment(message.from_user.id)
         if p and p["type"] in ("ban", "permban"):
@@ -526,132 +566,147 @@ def contact_command(message):
     bot.send_message(message.chat.id, article_contact(), parse_mode='HTML', reply_markup=menu_after_article())
 
 
-# === НАКАЗАНИЯ (АДМИН) ===
-@bot.message_handler(commands=['mute'])
-def mute_command(message):
-    if message.from_user.id != ADMIN_ID:
+# === АДМИН-КОМАНДЫ ===
+@bot.message_handler(commands=['stats'])
+@admin_only
+def stats_command(message):
+    count = get_users_count()
+    bot.reply_to(message, f"📊 Пользователей: <b>{count}</b>", parse_mode='HTML')
+
+
+@bot.message_handler(commands=['close'])
+@admin_only
+def close_command(message):
+    set_bot_status("closed")
+    bot.reply_to(message, "🔒 <b>Бот закрыт.</b>", parse_mode='HTML')
+
+
+@bot.message_handler(commands=['open'])
+@admin_only
+def open_command(message):
+    set_bot_status("open")
+    bot.reply_to(message, "🔓 <b>Бот открыт.</b>", parse_mode='HTML')
+
+
+@bot.message_handler(commands=['broadcast'])
+@admin_only
+def broadcast_command(message):
+    text = message.text.replace('/broadcast ', '', 1)
+    if not text or text == '/broadcast':
+        bot.reply_to(message, "📝 /broadcast [текст]")
         return
-    try:
-        parts = message.text.split(maxsplit=3)
-        user_id = int(parts[1])
-        duration = parts[2]  # Например: 1h, 30m, 2d
-        reason = parts[3] if len(parts) > 3 else "Без причины"
-
-        # Парсим время
-        until = parse_duration(duration)
-
-        add_punishment(user_id, "", "mute", reason, until)
-        bot.reply_to(message, f"🔇 Пользователь <code>{user_id}</code> замучен до {until}\nПричина: {reason}",
-                     parse_mode='HTML')
-
-        # Уведомление
+    users = get_all_users()
+    success = 0
+    for uid in users:
         try:
-            bot.send_message(user_id,
-                f"🔇 <b>Вы замучены</b>\n\n"
-                f"📝 Причина: {reason}\n"
-                f"⏰ До: {until}",
-                parse_mode='HTML')
+            bot.send_message(uid, text, parse_mode='HTML')
+            success += 1
         except Exception:
             pass
-    except (IndexError, ValueError):
-        bot.reply_to(message,
-            "📝 Формат: /mute [ID] [время] [причина]\n\n"
-            "Пример: /mute 123456789 1h Спам\n\n"
-            "Время: 30m = 30 минут, 1h = 1 час, 2d = 2 дня",
-            parse_mode='HTML')
+    bot.reply_to(message, f"📢 Отправлено: {success}")
 
 
-@bot.message_handler(commands=['ban'])
-def ban_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
+@bot.message_handler(commands=['say'])
+@admin_only
+def say_command(message):
+    text = message.text.replace('/say ', '', 1)
+    if text:
+        bot.send_message(message.chat.id, text, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['mute'])
+@admin_only
+def mute_command(message):
     try:
         parts = message.text.split(maxsplit=3)
         user_id = int(parts[1])
         duration = parts[2]
         reason = parts[3] if len(parts) > 3 else "Без причины"
-
         until = parse_duration(duration)
-        add_punishment(user_id, "", "ban", reason, until)
-        bot.reply_to(message, f"🚫 Пользователь <code>{user_id}</code> забанен до {until}\nПричина: {reason}",
+        add_punishment(user_id, "", "mute", reason, until)
+        bot.reply_to(message, f"🔇 Пользователь <code>{user_id}</code> замучен до {until}\nПричина: {reason}",
                      parse_mode='HTML')
-
         try:
             bot.send_message(user_id,
-                f"🚫 <b>Вы забанены</b>\n\n"
-                f"📝 Причина: {reason}\n"
-                f"⏰ До: {until}",
+                f"🔇 <b>Вы замучены</b>\n\n📝 {reason}\n⏰ До: {until}",
                 parse_mode='HTML')
         except Exception:
             pass
     except (IndexError, ValueError):
         bot.reply_to(message,
-            "📝 Формат: /ban [ID] [время] [причина]\n\n"
-            "Пример: /ban 123456789 7d Реклама",
+            "📝 /mute [ID] [время] [причина]\n\n"
+            "Пример: /mute 123456789 1h Спам\n"
+            "Время: 30m, 1h, 7d",
             parse_mode='HTML')
 
 
-@bot.message_handler(commands=['permban'])
-def permban_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
+@bot.message_handler(commands=['ban'])
+@admin_only
+def ban_command(message):
     try:
-        parts = message.text.split(maxsplit=2)
+        parts = message.text.split(maxsplit=3)
         user_id = int(parts[1])
-        reason = parts[2] if len(parts) > 2 else "Без причины"
-
-        add_punishment(user_id, "", "permban", reason, None)
-        bot.reply_to(message, f"⛔ Пользователь <code>{user_id}</code> перманентно забанен\nПричина: {reason}",
+        duration = parts[2]
+        reason = parts[3] if len(parts) > 3 else "Без причины"
+        until = parse_duration(duration)
+        add_punishment(user_id, "", "ban", reason, until)
+        bot.reply_to(message, f"🚫 Пользователь <code>{user_id}</code> забанен до {until}\nПричина: {reason}",
                      parse_mode='HTML')
-
         try:
             bot.send_message(user_id,
-                f"⛔ <b>Вы перманентно забанены</b>\n\n"
-                f"📝 Причина: {reason}\n"
-                f"⏰ Срок: навсегда",
+                f"🚫 <b>Вы забанены</b>\n\n📝 {reason}\n⏰ До: {until}",
                 parse_mode='HTML')
         except Exception:
             pass
     except (IndexError, ValueError):
-        bot.reply_to(message, "📝 Формат: /permban [ID] [причина]", parse_mode='HTML')
+        bot.reply_to(message, "📝 /ban [ID] [время] [причина]")
+
+
+@bot.message_handler(commands=['permban'])
+@admin_only
+def permban_command(message):
+    try:
+        parts = message.text.split(maxsplit=2)
+        user_id = int(parts[1])
+        reason = parts[2] if len(parts) > 2 else "Без причины"
+        add_punishment(user_id, "", "permban", reason, None)
+        bot.reply_to(message, f"⛔ Пользователь <code>{user_id}</code> перманентно забанен\nПричина: {reason}",
+                     parse_mode='HTML')
+        try:
+            bot.send_message(user_id,
+                f"⛔ <b>Вы перманентно забанены</b>\n\n📝 {reason}",
+                parse_mode='HTML')
+        except Exception:
+            pass
+    except (IndexError, ValueError):
+        bot.reply_to(message, "📝 /permban [ID] [причина]")
 
 
 @bot.message_handler(commands=['unmute'])
+@admin_only
 def unmute_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     try:
         user_id = int(message.text.split()[1])
         remove_punishment(user_id, "mute")
         bot.reply_to(message, f"🔊 Мут снят с <code>{user_id}</code>", parse_mode='HTML')
-        try:
-            bot.send_message(user_id, "🔊 <b>Мут снят!</b>", parse_mode='HTML')
-        except Exception:
-            pass
     except (IndexError, ValueError):
         bot.reply_to(message, "📝 /unmute [ID]")
 
 
 @bot.message_handler(commands=['unban'])
+@admin_only
 def unban_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     try:
         user_id = int(message.text.split()[1])
         remove_punishment(user_id)
         bot.reply_to(message, f"✅ Пользователь <code>{user_id}</code> разбанен", parse_mode='HTML')
-        try:
-            bot.send_message(user_id, "✅ <b>Вы разбанены!</b>", parse_mode='HTML')
-        except Exception:
-            pass
     except (IndexError, ValueError):
         bot.reply_to(message, "📝 /unban [ID]")
 
 
 @bot.message_handler(commands=['check'])
+@admin_only
 def check_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     try:
         user_id = int(message.text.split()[1])
         p = get_active_punishment(user_id)
@@ -671,92 +726,24 @@ def check_command(message):
 
 
 @bot.message_handler(commands=['punishments'])
+@admin_only
 def punishments_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     rows = get_all_punishments(20)
     if not rows:
         bot.reply_to(message, "📋 Наказаний пока нет.")
         return
-    text = "📋 <b>ПОСЛЕДНИЕ НАКАЗАНИЯ</b>\n\n"
+    text = "📋 <b>НАКАЗАНИЯ</b>\n\n"
     for r in rows:
         pid, uid, uname, ptype, reason, until, created, active = r
         st = "🟢" if active else "⚪"
         emoji = {"mute": "🔇", "ban": "🚫", "permban": "⛔"}.get(ptype, "⚠️")
-        text += f"{st}{emoji} <code>{uid}</code>\n"
-        text += f"   {reason}\n"
-        text += f"   ⏰ {until or 'навсегда'}\n\n"
+        text += f"{st}{emoji} <code>{uid}</code> | {reason}\n"
     bot.send_message(message.chat.id, text, parse_mode='HTML')
 
 
-def parse_duration(duration):
-    """Парсит '1h', '30m', '7d' → возвращает строку даты окончания."""
-    try:
-        unit = duration[-1].lower()
-        value = int(duration[:-1])
-        if unit == 'm':
-            delta = timedelta(minutes=value)
-        elif unit == 'h':
-            delta = timedelta(hours=value)
-        elif unit == 'd':
-            delta = timedelta(days=value)
-        else:
-            delta = timedelta(hours=1)
-        until = datetime.now() + delta
-        return until.strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        until = datetime.now() + timedelta(hours=1)
-        return until.strftime("%Y-%m-%d %H:%M:%S")
-
-
-# === ОСТАЛЬНЫЕ КОМАНДЫ ===
-@bot.message_handler(commands=['close'])
-def close_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    set_bot_status("closed")
-    bot.reply_to(message, "🔒 <b>Бот закрыт.</b>", parse_mode='HTML')
-
-
-@bot.message_handler(commands=['open'])
-def open_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    set_bot_status("open")
-    bot.reply_to(message, "🔓 <b>Бот открыт.</b>", parse_mode='HTML')
-
-
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    count = get_users_count()
-    bot.reply_to(message, f"📊 Пользователей: <b>{count}</b>", parse_mode='HTML')
-
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    text = message.text.replace('/broadcast ', '', 1)
-    if not text or text == '/broadcast':
-        bot.reply_to(message, "📝 /broadcast [текст]")
-        return
-    users = get_all_users()
-    success = 0
-    for uid in users:
-        try:
-            bot.send_message(uid, text, parse_mode='HTML')
-            success += 1
-        except Exception:
-            pass
-    bot.reply_to(message, f"📢 Отправлено: {success}")
-
-
 @bot.message_handler(commands=['confirm'])
+@admin_only
 def confirm_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     try:
         oid = int(message.text.split()[1])
     except (IndexError, ValueError):
@@ -775,9 +762,8 @@ def confirm_command(message):
 
 
 @bot.message_handler(commands=['done'])
+@admin_only
 def done_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     try:
         oid = int(message.text.split()[1])
     except (IndexError, ValueError):
@@ -864,6 +850,11 @@ def handle_schedule_input(message):
 def callback_handler(call):
     try:
         bot.answer_callback_query(call.id)
+
+        # Отказ в админ-кнопках для обычных пользователей
+        if call.data.startswith("admin_") and call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "⛔ Отказано в доступе", show_alert=True)
+            return
 
         # Проверка бана
         if call.from_user.id != ADMIN_ID:
